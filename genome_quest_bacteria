@@ -1,0 +1,360 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long qw(:config posix_default no_ignore_case gnu_compat);
+use Statistics::Lite qw(mean);
+use Statistics::Basic qw(:all); #cpanm Statistics::Basic で導入しておく必要あり
+#version history=============================================================================
+#v0.1 contig両末端の末端2000bpからprimer作成、リピートマスクのdefaultは16
+#v0.2 カバレッジ中央値をとるカラムを間違えていたので修正(column9:Median_foldから取る)。top10lengthからのみ集めるように修正。末端抽出サイズを選択するフラグ追加。
+#0.3 カバレッジ中央値を10000bp以上のcontigからとり、それらからSDx3（99%正確）を計算し、ばらつきを求める。SDx3範囲内のcontigのみprimerを設計する。SDを使うため、カバレッジ中央値はカバレッジ平均値に変更。
+#0.4 primerがないcontigでprimer名がずれる問題を修正。$minsize以上で異常なカバレッジのcontig名を別出力するよう修正
+#0.5 平均カバレッジ、残す最大カバレッジ、最小カバレッジのオプション指定に対応
+#0.6 blobtoolsでのplotに対応(blobtools、numpy、matplotlib、samtools、sminimap2、diamond,bwaをインストール)
+#0.61 diamond検索クエリ配列の最小サイズフラグを設定。それ以下は検索しない
+#0.63 taxonkitサブルーチン&taxidを導入。contigにクエリ情報を追加（blobtools実行時のみ）。taxonkitはdatabaseファイルもいるので準備を忘れないこと(cp names.dmp nodes.dmp $HOME/.taxonkit/)
+#0.7 taxidチェックをindex検索と並列化で高速化
+#0.8 bacteria assemblyに修正
+#dependency==================================================================================
+##bbmap(merge pair reads)
+##blobtools(contig plot)
+##bwa(mapping for blobtools)
+##unicycler(genome assembly)
+##pilon(polish)
+##elprep(polish)
+##sambamba(chimera assembly check)
+##nanoplot (ONT quality check)
+##nanoplot and Nanofilt (ONT quality check)
+#parameters===================================================================================
+my $contig = "";
+my $kmer = "list";
+my $mask = "masked.fa";
+my $fastq1 = "";
+my $fastq2 = "";
+my $nanopore = "";
+my $minsize = "2000";
+my $thread = "20";
+my $kmersize = "16";
+my $end = "1000";
+my $select1 = "55,81,101,115,127";
+my $meancov = "";
+my $maximumcov = "";
+my $minimumcov = "";
+my $diamonddb = "";
+my $evalue = "1e-100";
+my $taxiddb = "/root/uniprot_ref_proteomes.taxids";
+my $contiglimit = 500;
+my $mapper = "minimap2";
+my $primerrun = "no";
+my $div = "3";
+
+#option=======================================================================================
+GetOptions('nanopore=s' => \$nanopore,'1=s' => \$fastq1,'2=s' => \$fastq2,'k=i' => \$kmersize,'l=i' => \$end,'mc=i' => \$meancov,'minc=i' => \$minimumcov,'maxc=i' => \$maximumcov,'db=s' => \$diamonddb,'e=s' => \$evalue,'taxdb=s' => \$taxiddb,'t=i' => \$thread,'cl=i' => \$contiglimit,'map=s' => \$mapper,'primer=s' => \$primerrun,'d=i' => \$div);
+#title========================================================================================
+print "=============================================================================\n";
+print "#genome quest version0.2\t2018 11 13\n";
+print "Contact\: Kazuma Uesaka \<kazumaxneo\@gmail.com\>\n\n";
+print "Usage\: genome quest \[options\]\n";
+print "Options\:\n";
+print "\t-f\tassembly fasta\n";
+print "\t-1\tpaired read 1\n";
+print "\t-2\tpaired read 2\n";
+print "\tnanopore\tONT long read\n";
+print "\t-t\tthread number \(default 32\)\n";
+print "\t-d\t parallel thread number \(default 3\)\n";
+print "\t-cl\tminimum contig length for diamond blastx search \(default 500\)\n";
+print "\t-e\tevalue threshould for blastx uisng diamond \(default 1e-100\)\n";
+print "\t-db\tpath of diamond protein database for blobtools plotting \(default \-\)\n";
+print "\t-taxdb\tNCBI taxonomy ID database file\(default \/root\/uniprot_ref_proteomes\.taxids\)\n\n\n";
+print "ex\. run genome assembly \:\tgenome quest_bacteria \-1 pair1\.fq \-2 pair2\.fq \-nanopore ONT\.fq.gz -db uniprot_ref_proteomes.fasta \-e 1e\-100\n\n";
+print "=============================================================================\n";
+
+system("mkdir -p 1_raw_reads 2_QT_reads/short_read_quality_check 3_assembly_results/Flye 3_assembly_results/Unicycler 4_contamineation_check");
+system("mkdir -p 5_re-polish/Unicycler 5_re-polish/Flye");
+system("mkdir -p detail/2_QT_reads detail/2_QT_reads/QT_long_read_quality_check detail/2_QT_reads/raw_long_read_quality_check detail/3_assembly_results/Flye detail/3_assembly_results/Unicycler 4_contamineation_check detail/5_polish/Flye detail/5_polish/Unicycler");
+
+my $i = 1;my @cov = "";my @size = "";my @gc = "";my $total = 0;my @medi = "";my $meanvalue = 0;my $standarddivision = 0;my $sd = 0;
+
+#error
+die "\npaired-end fastq files are required !\n\n\n" if($fastq1 eq "");
+die "\npaired-end fastq files are required !\n\n\n" if($fastq2 eq "");
+#subroutine_part1==============================================================================
+&qc if($contig eq "");
+&assembly if($contig eq "");
+&polish if($contig eq "");
+$contig = "contigs.fasta" if($contig eq "");
+&blastx unless($diamonddb eq "");
+&blobtool unless($diamonddb eq "");
+
+system("sed \-e \"s\/_pilon\/\/g\" 5_re-polish/Unicycler/manual_polished.fasta > 1");
+system("sed -e \"s/>1/>chr/g\" 1 > 2 ");
+system("sed -e \"s/>2/>plasmid1/g\" 2 > 3 ");
+system("sed -e \"s/>3/>plasmid2/g\" 3 > 4 ");
+system("sed -e \"s/>4/>plasmid3/g\" 4 > 5 ");
+system("sed -e \"s/>5/>plasmid4/g\" 5 > 6 ");
+system("sed -e \"s/>6/>plasmid5/g\" 6 > 7 ");
+system("sed -e \"s/>7/>plasmid6/g\" 7 > 8 ");
+system("sed -e \"s/>8/>plasmid7/g\" 8 > 9 ");
+system("mv 9 5_re-polish/Unicycler/manual_polished.fasta ");
+
+system("sed \-e \"s\/_pilon\/\/g\" 5_re-polish/Flye/manual_polished.fasta > 1");
+system("sed -e \"s/>1/>chr/g\" 1 > 2 ");
+system("sed -e \"s/>2/>plasmid1/g\" 2 > 3 ");
+system("sed -e \"s/>3/>plasmid2/g\" 3 > 4 ");
+system("sed -e \"s/>4/>plasmid3/g\" 4 > 5 ");
+system("sed -e \"s/>5/>plasmid4/g\" 5 > 6 ");
+system("sed -e \"s/>6/>plasmid5/g\" 6 > 7 ");
+system("sed -e \"s/>7/>plasmid6/g\" 7 > 8 ");
+system("sed -e \"s/>8/>plasmid7/g\" 8 > 9 ");
+system("mv 9 5_re-polish/Flye/manual_polished.fasta ");
+
+#Unicycler
+system("bbmap.sh ref=5_re-polish/Unicycler/anual_polished.fasta nodisk in1=$fastq1 in2=$fastq2 covstats=5_re-polish/Unicycler/mapping.stats");
+system("rm *html split mapped.bam.cov merged.fq quality_trimmed_1.fq.gz quality_trimmed_2.fq.gz nanopore_trimmed.fq.gz blastx-out");
+system("mv diamond-out detail/4_contamineation_check/");
+system("mv contigs.fasta detail/3_assembly_results/Unicycler");
+system("mv 4_contamineation_check/blobDB.json detail/4_contamineation_check");
+system("rm -rf 4_contamineation_check/blobtools");
+system("mv 5_re-polish/Unicycler/pilon* detail/5_polish/Unicycler");
+system("mv 5_re-polish/Unicycler/temp/reference.fa 5_re-polish/Unicycler/");
+system("mv 5_re-polish/Unicycler/temp/reference.fa.fai 5_re-polish/Unicycler/");
+system("mv 5_re-polish/Unicycler/temp/F_sorted.bam* 5_re-polish/Unicycler/");
+system("mv 5_re-polish/Unicycler/temp/R_sorted.bam* 5_re-polish/Unicycler/");
+system("rm -rf 5_re-polish/Unicycler/temp");
+system("rm 1 2 3 4 5 6 7 8 5_re-polish/Unicycler/assembly.elfasta 5_re-polish/Unicycler/assembly.fasta 5_re-polish/Unicycler/pilon.elfasta");
+system("rm -rf detail/3_assembly_results/Unicycler/blast detail/3_assembly_results/Unicycler/pilon_polish detail/5_polish/Unicycler/pilon.elfasta detail/4_contamineation_check/diamond-out");
+
+#Flye
+system("bbmap.sh ref=5_re-polish/Flye/anual_polished.fasta nodisk in1=$fastq1 in2=$fastq2 covstats=5_re-polish/Flye/mapping.stats");
+system("mv 5_re-polish/Flye/pilon* detail/5_polish/Flye");
+system("mv 5_re-polish/Flye/temp/reference.fa 5_re-polish/Flye/");
+system("mv 5_re-polish/Flye/temp/reference.fa.fai 5_re-polish/Flye/");
+system("mv 5_re-polish/Flye/temp/F_sorted.bam* 5_re-polish/Flye/");
+system("mv 5_re-polish/Flye/temp/R_sorted.bam* 5_re-polish/Flye/");
+system("rm -rf 5_re-polish/Flye/temp");
+system("rm 1 2 3 4 5 6 7 8 5_re-polish/Flye/assembly.elfasta 5_re-polish/Flye/assembly.fasta 5_re-polish/Flye/pilon.elfasta");
+system("rm -rf detail/3_assembly_results/Flye/blast detail/3_assembly_results/Flye/pilon_polish detail/5_polish/Flye/pilon.elfasta detail/4_contamineation_check/diamond-out");
+#system("mv 4_contamineation_check/blobtools_order/order.blobDB.json.bestsum.order.p7.span.100.blobplot.bam0.png 4_contamineation_check/blobtools_order/Figure3.png");
+
+system("chmod a+rw -R * ");
+exit;
+
+#==================================================================================================================
+#===============================================subroutine=========================================================
+sub qc {
+	system("seqkit stats -T $fastq1 $fastq2 $nanopore > 1_raw_reads/raw_stats.txt");
+	system("NanoPlot --fastq $nanopore --loglength -t 12 -o 2_QT_reads/raw_long_read_quality_check");
+	system("fastp -i $fastq1 -I $fastq2 -3 -o 2_QT_reads/quality_trimmed_1.fq.gz -O 2_QT_reads/quality_trimmed_2.fq.gz -h 2_QT_reads/short_read_quality_check/report.html -j 2_QT_reads/short_read_quality_check/report.json -q 30 -n 20 -t 1 -T 1 -f 1 -F 1 -w 16");
+	system("filtlong -1 2_QT_reads/quality_trimmed_1.fq.gz -2 2_QT_reads/quality_trimmed_2.fq.gz --min_length 3000 --keep_percent 80 --target_bases 500000000 --trim --split 500 $nanopore | gzip - > 2_QT_reads/nanopore_trimmed.fq.gz ");
+	system("NanoPlot --fastq 2_QT_reads/nanopore_trimmed.fq.gz --loglength -t 12 -o 2_QT_reads/QT_long_read_quality_check");
+	system("seqkit stats -T 2_QT_reads/quality_trimmed* 2_QT_reads/nanopore_trimmed.fq.gz > 2_QT_reads/QT_stats.txt");
+	system("seqkit seq -m 20000 2_QT_reads/nanopore_trimmed.fq.gz > 20kb.fq");
+	system("mv 2_QT_reads/raw_long_read_quality_check/* detail/2_QT_reads/raw_long_read_quality_check");
+	system("mv 2_QT_reads/QT_long_read_quality_check/* detail/2_QT_reads/QT_long_read_quality_check");
+	system("sleep 1s");
+	system("mv detail/2_QT_reads/raw_long_read_quality_check/*html 2_QT_reads/raw_long_read_quality_check/");
+	system("mv detail/2_QT_reads/QT_long_read_quality_check/*html 2_QT_reads/");
+	system("bbmerge.sh in1=2_QT_reads/quality_trimmed_1.fq.gz in2=2_QT_reads/quality_trimmed_2.fq.gz out=merged.fq &");
+}
+
+#==================================================================================================================
+sub assembly {
+	system("unicycler -t $thread -o 3_assembly_results/Unicycler -1 2_QT_reads/quality_trimmed_1.fq.gz -2 2_QT_reads/quality_trimmed_2.fq.gz -l 2_QT_reads/nanopore_trimmed.fq.gz --keep 3");
+	system("flye -l 20kb.fq --out-dir 3_assembly_results/Flye --threads $thread");
+	system("cp 3_assembly_results/Unicycler/spades_assembly/assembly/contigs.fasta .");
+	#system("mv contigs.fasta diamond-out split blastx-out mapped.bam.cov temp2/");
+	system("rm -rf 3_assembly_results/Unicycler/simple_bridging 3_assembly_results/Unicycler/read_alignment 3_assembly_results/Unicycler/miniasm_assembly 3_assembly_results/Unicycler/spades_assembly");
+	system("mv 3_assembly_results/Unicycler/* detail/3_assembly_results/Unicycler/");
+	system("mv 3_assembly_results/Flye/* detail/3_assembly_results/Flye/");
+	system("rm -rf 3_assembly_results/Flye/* ");
+	system("mv detail/3_assembly_results/Unicycler/assembly.fasta 3_assembly_results/Unicycler/");
+	system("mv detail/3_assembly_results/Flye/assembly.fasta 3_assembly_results/Flye/");
+	system("Bandage image detail/3_assembly_results/Unicycler/assembly.gfa 3_assembly_results/Unicycler/Figure2A.png");
+	system("Bandage image detail/3_assembly_results/Flye/assembly_graph.gfa 3_assembly_results/Flye/Figure2B.png");
+}
+
+#==================================================================================================================
+sub polish {
+	system("cp 2_QT_reads/*fq.gz . ");
+	#$R1 = "quality_trimmed_1.fq.gz";
+	#$R2 = "quality_trimmed_2.fq.gz";
+	#$long = "nanopore_trimmed.fq.gz";
+	system("cp /home/kazu/Downloads/pilon-1.23.jar 5_re-polish/ ");
+	system("cp 3_assembly_results/Unicycler/assembly.fasta 5_re-polish/Unicycler/ ");
+	system("cp 3_assembly_results/Flye/assembly.fasta 5_re-polish/Flye/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Unicycler/assembly.fasta 5_re-polish/Unicycler/assembly.elfasta");
+	system("elprep fasta-to-elfasta 5_re-polish/Flye/assembly.fasta 5_re-polish/Flye/assembly.elfasta");
+	system("bbmerge.sh in1=$fastq1 in2=$fastq2 out=merged.fq ");
+	#$merge = "merged.fq";
+	
+	#Unicycler
+	system("minimap2 -ax sr -t $thread 5_re-polish/Unicycler/assembly.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Unicycler/short1.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Unicycler/short1.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Unicycler/assembly.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/long1.bam && samtools index -@ 8 5_re-polish/Unicycler/long1.bam ");
+	system("java -Xmx40G -jar /usr/local/bin/pilon-1.23.jar --genome  5_re-polish/Unicycler/assembly.fasta --frags 5_re-polish/Unicycler/short1.bam --nanopore 5_re-polish/Unicycler/long1.bam --changes --threads $thread --outdir 5_re-polish/Unicycler/pilon_output_dir1 && cp 5_re-polish/Unicycler/pilon_output_dir1/pilon.fasta 5_re-polish/Unicycler/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Unicycler/pilon.fasta 5_re-polish/Unicycler/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Unicycler/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Unicycler/short2.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Unicycler/short2.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Unicycler/pilon.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/long2.bam && samtools index -@ 8 5_re-polish/Unicycler/long2.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome  5_re-polish/Unicycler/pilon.fasta --frags 5_re-polish/Unicycler/short2.bam --nanopore 5_re-polish/Unicycler/long2.bam --changes --threads $thread --outdir 5_re-polish/Unicycler/pilon_output_dir2 && cp 5_re-polish/Unicycler/pilon_output_dir2/pilon.fasta 5_re-polish/Unicycler/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Unicycler/pilon.fasta 5_re-polish/Unicycler/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Unicycler/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Unicycler/short3.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Unicycler/short3.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Unicycler/pilon.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/long3.bam && samtools index -@ 8 5_re-polish/Unicycler/long3.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Unicycler/pilon.fasta --frags 5_re-polish/Unicycler/short3.bam --nanopore 5_re-polish/Unicycler/long3.bam --changes --threads $thread --outdir 5_re-polish/Unicycler/pilon_output_dir3 && cp 5_re-polish/Unicycler/pilon_output_dir3/pilon.fasta 5_re-polish/Unicycler/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Unicycler/pilon.fasta 5_re-polish/Unicycler/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Unicycler/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Unicycler/short4.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Unicycler/short4.bam");
+	system("minimap2 -t $thread -ax sr 5_re-polish/Unicycler/pilon.fasta merged.fq | samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/merge1.bam && samtools index -@ 8 5_re-polish/Unicycler/merge1.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Unicycler/pilon.fasta --frags 5_re-polish/Unicycler/short4.bam --pacbio 5_re-polish/Unicycler/merge1.bam --changes --threads $thread --outdir 5_re-polish/Unicycler/pilon_output_dir4 && cp 5_re-polish/Unicycler/pilon_output_dir4/pilon.fasta 5_re-polish/Unicycler/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Unicycler/pilon.fasta 5_re-polish/Unicycler/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Unicycler/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Unicycler/short5.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Unicycler/short5.bam");
+	system("minimap2 -t $thread -ax sr 5_re-polish/Unicycler/pilon.fasta merged.fq | samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/merge2.bam && samtools index -@ 8 5_re-polish/Unicycler/merge2.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Unicycler/pilon.fasta --frags 5_re-polish/Unicycler/short5.bam --pacbio 5_re-polish/Unicycler/merge2.bam --changes --threads $thread --outdir 5_re-polish/Unicycler/pilon_output_dir5 && cp 5_re-polish/Unicycler/pilon_output_dir5/pilon.fasta 5_re-polish/Unicycler/ ");
+	system("samtools faidx 5_re-polish/Unicycler/pilon.fasta ");
+	system("SV-Quest.pl -f 5_re-polish/Unicycler/pilon.fasta -1 $fastq1 -2 $fastq2 ");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Unicycler/temp/reference.fa 2_QT_reads/nanopore_trimmed.fq.gz |samtools sort -@ 8 -O BAM - > 5_re-polish/Unicycler/temp/long.bam && samtools index 5_re-polish/Unicycler/temp/long.bam ");
+	system("rm 5_re-polish/Unicycler/*bam* 5_re-polish/Unicycler/*fai 5_re-polish/Unicycler/*pilon*html ");
+	system("mv 5_re-polish/Unicycler/pilon.fasta 5_re-polish/Unicycler/manual_polished.fasta ");
+	system("mv temp summary/InDel.txt 5_re-polish/Unicycler");
+	system("rm -rf temp2/ summary/");
+
+	#Flye
+	system("minimap2 -ax sr -t $thread 5_re-polish/Flye/assembly.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Flye/short1.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Flye/short1.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Flye/assembly.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/long1.bam && samtools index -@ 8 5_re-polish/Flye/long1.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome  5_re-polish/Flye/assembly.fasta --frags 5_re-polish/Flye/short1.bam --nanopore 5_re-polish/Flye/long1.bam --changes --threads $thread --outdir 5_re-polish/Flye/pilon_output_dir1 && cp 5_re-polish/Flye/pilon_output_dir1/pilon.fasta 5_re-polish/Flye/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Flye/pilon.fasta 5_re-polish/Flye/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Flye/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Flye/short2.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Flye/short2.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Flye/pilon.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/long2.bam && samtools index -@ 8 5_re-polish/Flye/long2.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome  5_re-polish/Flye/pilon.fasta --frags 5_re-polish/Flye/short2.bam --nanopore 5_re-polish/Flye/long2.bam --changes --threads $thread --outdir 5_re-polish/Flye/pilon_output_dir2 && cp 5_re-polish/Flye/pilon_output_dir2/pilon.fasta 5_re-polish/Flye/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Flye/pilon.fasta 5_re-polish/Flye/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Flye/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Flye/short3.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Flye/short3.bam");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Flye/pilon.fasta 2_QT_reads/nanopore_trimmed.fq.gz | samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/long3.bam && samtools index -@ 8 5_re-polish/Flye/long3.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Flye/pilon.fasta --frags 5_re-polish/Flye/short3.bam --nanopore 5_re-polish/Flye/long3.bam --changes --threads $thread --outdir 5_re-polish/Flye/pilon_output_dir3 && cp 5_re-polish/Flye/pilon_output_dir3/pilon.fasta 5_re-polish/Flye/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Flye/pilon.fasta 5_re-polish/Flye/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Flye/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Flye/short4.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Flye/short4.bam");
+	system("minimap2 -t $thread -ax sr 5_re-polish/Flye/pilon.fasta merged.fq | samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/merge1.bam && samtools index -@ 8 5_re-polish/Flye/merge1.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Flye/pilon.fasta --frags 5_re-polish/Flye/short4.bam --pacbio 5_re-polish/Flye/merge1.bam --changes --threads $thread --outdir 5_re-polish/Flye/pilon_output_dir4 && cp 5_re-polish/Flye/pilon_output_dir4/pilon.fasta 5_re-polish/Flye/ ");
+	system("elprep fasta-to-elfasta 5_re-polish/Flye/pilon.fasta 5_re-polish/Flye/pilon.elfasta");
+	
+	system("minimap2 -ax sr -t $thread 5_re-polish/Flye/pilon.fasta $fastq1 $fastq2 | elprep filter /dev/stdin 5_re-polish/Flye/short5.bam --mark-duplicates --remove-duplicates --filter-mapping-quality 0 --clean-sam --nr-of-threads $thread --sorting-order coordinate --filter-unmapped-reads-strict ");
+	system("samtools index -@ 8 5_re-polish/Flye/short5.bam");
+	system("minimap2 -t $thread -ax sr 5_re-polish/Flye/pilon.fasta merged.fq | samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/merge2.bam && samtools index -@ 8 5_re-polish/Flye/merge2.bam ");
+	system("java -Xmx60G -jar /usr/local/bin/pilon-1.23.jar --genome 5_re-polish/Flye/pilon.fasta --frags 5_re-polish/Flye/short5.bam --pacbio 5_re-polish/Flye/merge2.bam --changes --threads $thread --outdir 5_re-polish/Flye/pilon_output_dir5 && cp 5_re-polish/Flye/pilon_output_dir5/pilon.fasta 5_re-polish/Flye/ ");
+	system("samtools faidx 5_re-polish/Flye/pilon.fasta ");
+	system("SV-Quest.pl -f 5_re-polish/Flye/pilon.fasta -1 $fastq1 -2 $fastq2 ");
+	system("minimap2 -t $thread -ax map-ont 5_re-polish/Flye/temp/reference.fa 2_QT_reads/nanopore_trimmed.fq.gz |samtools sort -@ 8 -O BAM - > 5_re-polish/Flye/temp/long.bam && samtools index 5_re-polish/Flye/temp/long.bam ");
+	system("rm 5_re-polish/Flye/*bam* 5_re-polish/Flye/*fai 5_re-polish/Flye/*pilon*html ");
+	system("mv 5_re-polish/Flye/pilon.fasta 5_re-polish/Flye/manual_polished.fasta ");
+	system("mv temp summary/InDel.txt 5_re-polish/Flye");
+	system("rm -rf temp2/ summary/");
+}
+
+#==================================================================================================================
+sub blastx {
+	#unipprotデータベースとproteome_taxidはユーザがダウンロードして準備する必要がある。
+	die "\npaired-end fastq files are required !\n\n\n" if($fastq1 eq "");
+	print "blastx to database using diamond\n";
+	system("seqkit seq -m $contiglimit $contig > seq");
+	system("sleep 1s");
+	system("mkdir temp2");
+	system("diamond blastx --query seq --db $diamonddb --outfmt 6 --max-target-seqs 1 --evalue $evalue > diamond-out");
+	system("rm seq");
+	system("wc -l diamond-out |cut -f 1 -d \" \" > split");
+	open INPUT6, "<split" or die "cant open split file!\n";
+	my $splitvalue = <INPUT6>;
+	my $splitnumber = int($splitvalue / $div);
+	system("split -l $splitnumber diamond-out temp2/Split_");
+	print "tax check using parallel command\n";
+	system("ls temp2/Split_* |  parallel -j $div \'tax-check.pl -i {} -o {}output \' ");
+	system("cat temp2/*output > blastx-out");
+}
+#==================================================================================================================
+sub blobtool {
+	print "blobtools coverage plot\n";
+	system("mkdir blobtools");
+	system("minimap2 -ax sr -t $thread $contig 2_QT_reads/quality_trimmed_1.fq.gz 2_QT_reads/quality_trimmed_2.fq.gz | samtools sort -O BAM -@ 8 - > blobtools/mapped.bam");
+	system("samtools index -@ 4 blobtools/mapped.bam");
+	system("blobtools create -i $contig -b blobtools/mapped.bam -t blastx-out");
+	system("sleep 2s");
+	
+	system("blobtools plot -i blobDB.json -r superkingdom -o superkingdom");
+	system("mkdir blobtools_superkingdom");
+	system("mv superkingdom* blobtools_superkingdom/");
+	
+	system("blobtools plot -i blobDB.json -r phylum -o phylum");
+	system("mkdir blobtools_phylum");
+	system("mv phylum* blobtools_phylum/");
+	system("mv blobtools_phylum/blobplot.bam0.png blobtools_phylum/Figure3.png");
+
+	system("blobtools plot -i blobDB.json -r family -o family");
+	system("mkdir blobtools_family");
+	system("mv family* blobtools_family/");
+	
+	system("blobtools plot -i blobDB.json -r order -o order");
+	system("mkdir blobtools_order");
+	system("mv order* blobtools_order/");
+	
+	system("blobtools plot -i blobDB.json -r genus -o genus");
+	system("mkdir blobtools_genus");
+	system("mv genus* blobtools_genus/");
+	
+	system("blobtools plot -i blobDB.json -r species -o species");
+	system("mkdir blobtools_species");
+	system("mv species* blobtools_species/");
+
+	system("mv blob* 4_contamineation_check/");
+
+}
+
+#==================================================================================================================
+sub taxid {
+	system("cut -f 2 blastx-out > ids");
+	system("sleep 3s");
+	system("taxonkit lineage -j 8 -t ids > lineage");
+	system("sleep 3s");
+	system("paste blastx-out lineage > blast-out-lineage");
+	system("sleep 3s");
+	open BLASTRESULT, "<blast-out-lineage" or die "cant open blastx-out file!\n";
+	open STAT, ">contig_statistics" or die "cant write STAT file!\n";
+	open INPUTMAP, "<mapping.stats" or die "cant open mapping\.stats file!\n";
+
+	
+	my $bb = 0;my @blastname = "";my @lineagename = "";my @blasttaxid = "";
+	while (my $bline = <BLASTRESULT>) {
+		chomp($bline);
+		my @bbox = split(/\t/, $bline);
+		$blastname[$bb] = $bbox[0];
+		$lineagename[$bb] = $bbox[4];
+		$blasttaxid[$bb] = $bbox[5];
+		$bb++;
+	}
+	
+	my $ix = 1;my @mapname = "";
+	my $statsx = <INPUTMAP>;
+	while (my $statsx = <INPUTMAP>) {
+		chomp($statsx);
+		my @boxx = split(/\t/, $statsx);
+		$mapname[$i] = $boxx[0];#column0 name
+		$ix++;
+		my $ccc = 0;
+		foreach my $var(@blastname){
+			print STAT "$statsx\t$lineagename[$ccc]\t$blasttaxid[$ccc]\n" if($var eq $mapname[$i]);
+			$ccc++;
+		}
+	}
+	system("sleep 3s");
+	system("cp blast-out-lineage mapping.stats");
+	system("rm lineage ids");
+}
