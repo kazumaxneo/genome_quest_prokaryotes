@@ -1,1 +1,3 @@
-# genome_quest_prokaryotes
+sudo cpan Statistics::Basic  
+sudo cpan Statistics::Lite  
+
