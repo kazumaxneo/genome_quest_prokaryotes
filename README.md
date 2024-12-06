@@ -1,6 +1,6 @@
 ### Genome Quest Setup and Usage
 
-#### 1. Docker (Easiest Way)
+#### 1. Run using prebuild docker image (Easiest Way)
 
 Run the following command to start a Docker container with the necessary environment:
 
@@ -21,7 +21,7 @@ genome_quest -1 sample_R1.fq.gz -2 sample_R2.fq.gz -n ONT.fq.gz -b /nodeDB/nodes
 ```
 
 
-#### 2. Create enviroment
+#### 2. Install. Create conda enviroment
 ```bash
 git clone https://github.com/kazumaxneo/genome_quest_prokaryotes.git  
 cd genome_quest_prokaryotes/
