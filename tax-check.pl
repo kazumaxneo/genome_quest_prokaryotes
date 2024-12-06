@@ -18,7 +18,7 @@ GetOptions('i=s' => \$input,'o=s' => \$output);
 #subroutine==============================================================================
 sub blastx {
 	system("");
-	open DATABASE, "</root/uniprot_ref_proteomes.taxids" or die "cant open txt file1!\n";
+	open DATABASE, "</nodeDB/uniprot_ref_proteomes.taxids" or die "cant open txt uniprot_ref_proteomes.taxids database!\n";
 	my @proteina0 = "";my @proteina1 = "";my @proteina2 = "";my @proteina3 = "";my @proteina4 = "";my @proteina5 = "";my @proteina6 = "";my @proteina7 = "";my @proteina8 = "";my @proteina9 = "";
 	my @proteinb = "";my @proteinc = "";my @proteind = "";my @proteine = "";my @proteinf = "";my @proteing = "";my @proteinh = "";my @proteini = "";my @proteinj = "";my @proteink = "";my @proteinl = "";my @proteinm = "";my @proteinn = "";my @proteino = "";my @proteinp = "";my @proteinq = "";my @proteinr = "";my @proteins = "";my @proteint = "";my @proteinu = "";my @proteinv = "";my @proteinw = "";my @proteinx = "";my @proteiny = "";my @proteinz = "";my @proteinother = "";
 	my @taxida0 = "";my @taxida1 = "";my @taxida2 = "";my @taxida3 = "";my @taxida4 = "";my @taxida5 = "";my @taxida6 = "";my @taxida7 = "";my @taxida8 = "";my @taxida9 = "";
