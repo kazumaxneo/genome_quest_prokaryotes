@@ -11,8 +11,15 @@ docker run -itv $PWD:/data -w /test --rm kazumax/genome_quest:0.2
 To perform a test run, execute:
 
 ```bash
-genome_quest -1 short_R1.fq.gz -2 short_R2.fq.gz -n ONT.fq.gz -p /usr/local/bin/pilon-1.24.jar -b /nodeDB/nodesDB.txt -d /nodeDB/uniprot_ref_proteomes.diamond.dmnd
+cd /test
+genome_quest -1 short_R1.fq.gz -2 short_R2.fq.gz -n ONT.fq.gz -p /usr/local/bin/pilon-1.24.jar -b /nodeDB/nodesDB.txt -d /nodeDB/uniprot_ref_proteomes.diamond.dmnd 
 ```
+
+your fastq  
+```bash
+genome_quest -1 sample_R1.fq.gz -2 sample_R2.fq.gz -n ONT.fq.gz -b /nodeDB/nodesDB.txt -d /nodeDB/uniprot_ref_proteomes.diamond.dmnd -p /usr/local/bin/pilon-1.24.jar
+```
+
 
 #### 2. Create enviroment
 ```bash
