@@ -5,7 +5,8 @@
 Run the following command to start a Docker container with the necessary environment:
 
 ```bash
-docker run -itv $PWD:/data -w /test --rm kazumax/genome_quest:0.2
+docker pull kazumax/genome_quest:0.37
+docker run -itv $PWD:/data -w /test --rm kazumax/genome_quest:0.37
 ```
 
 To perform a test run, execute:
